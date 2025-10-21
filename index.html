@@ -1,0 +1,175 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Particle Life (Optimized & Aspect-Correct)</title>
+<style>
+  body {
+      margin: 0;
+      height: 100vh;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      background-color: black;
+  }
+
+  canvas {
+      border: 3px solid white;
+      border-radius: 20px;
+      background-color: black;
+      image-rendering: pixelated;
+      width: 95vw;
+      height: 95vh;
+  }
+</style>
+</head>
+<body>
+  <canvas id="my-canvas"></canvas>
+  <script>
+    const canvas = document.getElementById("my-canvas");
+const ctx = canvas.getContext("2d");
+
+// Simulation parameters
+const n = 2000;         // particle count
+const dt = 0.02;
+const frictionHalfLife = 0.04;
+const rMax = 0.1;
+const m = 6;             // number of species
+const forceFactor = 10;
+
+const matrix = makeRandomMatrix();
+const frictionFactor = Math.pow(0.5, dt / frictionHalfLife);
+
+// Particle arrays
+const colors = new Int32Array(n);
+const positionsX = new Float32Array(n);
+const positionsY = new Float32Array(n);
+const velocitiesX = new Float32Array(n);
+const velocitiesY = new Float32Array(n);
+
+// Initialize particles
+for (let i = 0; i < n; i++) {
+    colors[i] = Math.floor(Math.random() * m);
+    positionsX[i] = Math.random();
+    positionsY[i] = Math.random();
+    velocitiesX[i] = 0;
+    velocitiesY[i] = 0;
+}
+
+// Interaction matrix
+function makeRandomMatrix() {
+    const rows = [];
+    for (let i = 0; i < m; i++) {
+        const row = [];
+        for (let j = 0; j < m; j++) {
+            row.push(Math.random() * 2 - 1);
+        }
+        rows.push(row);
+    }
+    return rows;
+}
+
+// Force function
+function force(r, a) {
+    const beta = 0.3;
+    if (r < beta) return r / beta - 1;
+    else if (r < 1) return a * (1 - Math.abs(2 * r - 1 - beta) / (1 - beta));
+    return 0;
+}
+
+// Resize canvas and get aspect ratio
+function resizeCanvas() {
+    canvas.width = canvas.clientWidth;
+    canvas.height = canvas.clientHeight;
+}
+window.addEventListener("resize", resizeCanvas);
+resizeCanvas();
+
+// Optimized particle update with aspect correction
+function updateParticles() {
+    const aspect = canvas.width / canvas.height; // width / height
+    const gridSize = rMax; 
+    const grid = new Map();
+
+    // Build spatial grid
+    for (let i = 0; i < n; i++) {
+        const gx = Math.floor(positionsX[i] / gridSize);
+        const gy = Math.floor(positionsY[i] / gridSize);
+        const key = gx + "," + gy;
+        if (!grid.has(key)) grid.set(key, []);
+        grid.get(key).push(i);
+    }
+
+    // Compute forces
+    for (let i = 0; i < n; i++) {
+        let fx = 0, fy = 0;
+        const gx = Math.floor(positionsX[i] / gridSize);
+        const gy = Math.floor(positionsY[i] / gridSize);
+
+        for (let dx = -1; dx <= 1; dx++) {
+            for (let dy = -1; dy <= 1; dy++) {
+                const key = (gx + dx) + "," + (gy + dy);
+                const cell = grid.get(key);
+                if (!cell) continue;
+
+                for (const j of cell) {
+                    if (i === j) continue;
+
+                    let rx = positionsX[j] - positionsX[i];
+                    let ry = positionsY[j] - positionsY[i];
+
+                    // wrap-around distances
+                    rx -= Math.round(rx);
+                    ry -= Math.round(ry);
+
+                    // aspect correction
+                    const dxAspect = rx * aspect;
+                    const dyAspect = ry;
+                    const r = Math.hypot(dxAspect, dyAspect);
+
+                    if (r > 0 && r < rMax) {
+                        const f = force(r / rMax, matrix[colors[i]][colors[j]]);
+                        fx += (dxAspect / r) * f;
+                        fy += (dyAspect / r) * f;
+                    }
+                }
+            }
+        }
+
+        // Update velocities with friction
+        velocitiesX[i] = velocitiesX[i] * frictionFactor + fx * dt / aspect; 
+        velocitiesY[i] = velocitiesY[i] * frictionFactor + fy * dt;
+    }
+
+    // Move particles and wrap edges
+    for (let i = 0; i < n; i++) {
+        positionsX[i] = (positionsX[i] + velocitiesX[i] * dt + 1) % 1;
+        positionsY[i] = (positionsY[i] + velocitiesY[i] * dt + 1) % 1;
+    }
+}
+
+// Draw particles
+function drawParticles() {
+    ctx.fillStyle = "black";
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+    for (let i = 0; i < n; i++) {
+        const x = positionsX[i] * canvas.width;
+        const y = positionsY[i] * canvas.height;
+        ctx.fillStyle = `hsl(${(colors[i]/m)*360}, 100%, 50%)`;
+        ctx.fillRect(x, y, 2, 2);
+    }
+}
+
+// Main loop
+function loop() {
+    updateParticles();
+    drawParticles();
+    requestAnimationFrame(loop);
+}
+
+requestAnimationFrame(loop);
+  </script>
+</body>
+</html>

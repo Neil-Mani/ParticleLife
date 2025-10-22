@@ -1,3 +1,2 @@
-![image!](images/Particle Life.png)
-
+<img src="images/Particle Life.png" alt="Project Logo" width="200">
 

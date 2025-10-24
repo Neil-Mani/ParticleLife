@@ -13,6 +13,7 @@ import java.awt.Color;
 import java.awt.Dimension;
 import java.awt.Graphics;
 import java.awt.Graphics2D;
+import java.awt.RenderingHints;
 import java.awt.BorderLayout;
 import java.awt.GridLayout;
 import java.awt.FlowLayout;
@@ -20,10 +21,12 @@ import java.awt.GridBagLayout;
 import java.awt.GridBagConstraints;
 import java.awt.Insets;
 import java.awt.Point;
+import java.awt.image.BufferedImage;
 import java.awt.event.MouseAdapter;
 import java.awt.event.MouseEvent;
 import java.awt.event.KeyAdapter;
 import java.awt.event.KeyEvent;
+import java.awt.event.MouseWheelEvent;
 import java.awt.geom.Point2D;
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -67,7 +70,7 @@ public class ParticleLife extends JFrame {
         setLocationRelativeTo(null);
         
         // Generate initial particles
-        simulationPanel.generateRandomParticles(2000);
+        simulationPanel.generateRandomParticles(5000);
     }
     
     private void createControlPanel() {
@@ -105,10 +108,18 @@ public class ParticleLife extends JFrame {
         JButton randomButton = new JButton("Random Matrix");
         randomButton.addActionListener(e -> {
             simulationPanel.randomizeMatrix();
-            simulationPanel.generateRandomParticles(5000);
+            simulationPanel.generateRandomParticles(10000);
             matrixPanel.updateFields();
         });
         topPanel.add(randomButton);
+        
+        // Boundary mode toggle
+        JButton boundaryButton = new JButton("Mode: Wrap");
+        boundaryButton.addActionListener(e -> {
+            String mode = simulationPanel.cycleBoundaryMode();
+            boundaryButton.setText("Mode: " + mode);
+        });
+        topPanel.add(boundaryButton);
         
         
         controlPanel.add(topPanel, BorderLayout.NORTH);
@@ -149,7 +160,7 @@ public class ParticleLife extends JFrame {
         gbc.anchor = GridBagConstraints.WEST;
         gbc.fill = GridBagConstraints.HORIZONTAL;
         
-        JLabel infoLabel = new JLabel("<html><b>Drag on canvas to place particles</b></html>");
+        JLabel infoLabel = new JLabel("<html><b>Drag to place | Right-drag to pan | Scroll to zoom</b></html>");
         infoLabel.setForeground(Color.WHITE);
         placementPanel.add(infoLabel, gbc);
         
@@ -179,7 +190,7 @@ public class ParticleLife extends JFrame {
         countField.addActionListener(e -> {
             try {
                 int count = Integer.parseInt(countField.getText());
-                simulationPanel.setParticleCount(Math.max(1, Math.min(1000, count)));
+                simulationPanel.setParticleCount(Math.max(1, Math.min(5000, count)));
             } catch (NumberFormatException ex) {
                 countField.setText("100");
             }
@@ -241,7 +252,7 @@ public class ParticleLife extends JFrame {
 }
 
 class SimulationPanel extends JPanel {
-    static final int MAX_PARTICLES = 10000;
+    static final int MAX_PARTICLES = 50000;
     static final double DT = 0.02;
     static final double FRICTION_HALF_LIFE = 0.04;
     static final double R_MAX = 0.1;
@@ -267,23 +278,45 @@ class SimulationPanel extends JPanel {
     private Point dragStart = null;
     private Point dragEnd = null;
     private boolean paused = false;
+    
+    // Camera/viewport controls
+    private double cameraX = 0.5;
+    private double cameraY = 0.5;
+    private double zoom = 1.0;
+    private Point lastPanPoint = null;
+    
+    // Boundary mode
+    private BoundaryMode boundaryMode = BoundaryMode.WRAP;
+    
+    // Performance optimization: buffered image
+    private BufferedImage buffer;
+    private Graphics2D bufferGraphics;
+    
+    // FPS tracking
+    private long lastFrameTime = System.nanoTime();
+    private int frameCount = 0;
+    private double fps = 60.0;
+    
+    enum BoundaryMode {
+        WRAP,
+        CLOSED,
+        INFINITE
+    }
 
     void randomizeEverything() {
         matrix = makeRandomMatrix();
 
-        int newM = 3 + rand.nextInt(M - 2); // pick 3..6 species
+        int newM = 3 + rand.nextInt(M - 2);
         List<Integer> indices = new ArrayList<>();
         for (int i = 0; i < M; i++) indices.add(i);
         Collections.shuffle(indices, rand);
 
-        // assign random colors from default colors
         int[] speciesMapping = new int[newM];
         for (int i = 0; i < newM; i++) speciesMapping[i] = indices.get(i);
 
-        // Clear current particles
         particleCount = 0;
 
-        int count = 1000 + rand.nextInt(4000);
+        int count = 5000 + rand.nextInt(15000);
         for (int i = 0; i < count && particleCount < MAX_PARTICLES; i++) {
             int species = speciesMapping[rand.nextInt(newM)];
             colors[particleCount] = species;
@@ -320,29 +353,62 @@ class SimulationPanel extends JPanel {
         MouseAdapter mouseHandler = new MouseAdapter() {
             @Override
             public void mousePressed(MouseEvent e) {
-                dragStart = e.getPoint();
-                dragEnd = e.getPoint();
+                if (e.getButton() == MouseEvent.BUTTON3) {
+                    lastPanPoint = e.getPoint();
+                } else {
+                    dragStart = e.getPoint();
+                    dragEnd = e.getPoint();
+                }
             }
             
             @Override
             public void mouseDragged(MouseEvent e) {
-                dragEnd = e.getPoint();
+                if (lastPanPoint != null) {
+                    int dx = e.getX() - lastPanPoint.x;
+                    int dy = e.getY() - lastPanPoint.y;
+                    
+                    cameraX -= (double) dx / (getWidth() * zoom);
+                    cameraY -= (double) dy / (getHeight() * zoom);
+                    
+                    lastPanPoint = e.getPoint();
+                } else if (dragStart != null) {
+                    dragEnd = e.getPoint();
+                }
                 repaint();
             }
             
             @Override
             public void mouseReleased(MouseEvent e) {
-                if (dragStart != null && dragEnd != null) {
+                if (lastPanPoint != null) {
+                    lastPanPoint = null;
+                } else if (dragStart != null && dragEnd != null) {
                     addParticlesInShape(dragStart, dragEnd);
+                    dragStart = null;
+                    dragEnd = null;
                 }
-                dragStart = null;
-                dragEnd = null;
+                repaint();
+            }
+            
+            @Override
+            public void mouseWheelMoved(MouseWheelEvent e) {
+                Point2D.Double mouseWorld = screenToWorld(e.getX(), e.getY());
+                
+                double zoomFactor = e.getPreciseWheelRotation() > 0 ? 0.9 : 1.1;
+                zoom *= zoomFactor;
+                zoom = Math.max(0.1, Math.min(10.0, zoom));
+                
+                Point2D.Double mouseWorldAfter = screenToWorld(e.getX(), e.getY());
+                
+                cameraX += mouseWorld.x - mouseWorldAfter.x;
+                cameraY += mouseWorld.y - mouseWorldAfter.y;
+                
                 repaint();
             }
         };
         
         addMouseListener(mouseHandler);
         addMouseMotionListener(mouseHandler);
+        addMouseWheelListener(mouseHandler);
 
         Timer timer = new Timer(16, e -> {
             if (!paused) {
@@ -352,12 +418,23 @@ class SimulationPanel extends JPanel {
         });
         timer.start();
     }
+    
+    private Point2D.Double screenToWorld(int screenX, int screenY) {
+        double worldX = cameraX + (screenX - getWidth() / 2.0) / (getWidth() * zoom);
+        double worldY = cameraY + (screenY - getHeight() / 2.0) / (getHeight() * zoom);
+        return new Point2D.Double(worldX, worldY);
+    }
+    
+    private Point worldToScreen(double worldX, double worldY) {
+        int screenX = (int) ((worldX - cameraX) * getWidth() * zoom + getWidth() / 2.0);
+        int screenY = (int) ((worldY - cameraY) * getHeight() * zoom + getHeight() / 2.0);
+        return new Point(screenX, screenY);
+    }
 
     private double[][] makeRandomMatrix() {
         double[][] mat = new double[M][M];
         for (int i = 0; i < M; i++) {
             for (int j = 0; j < M; j++) {
-                // smaller random forces (-0.5 to +0.5 instead of -1 to +1)
                 mat[i][j] = (rand.nextDouble() * 1.0) - 0.5;
             }
         }
@@ -392,6 +469,22 @@ class SimulationPanel extends JPanel {
         paused = !paused;
         return paused;
     }
+    
+    String cycleBoundaryMode() {
+        switch (boundaryMode) {
+            case WRAP:
+                boundaryMode = BoundaryMode.CLOSED;
+                return "Closed";
+            case CLOSED:
+                boundaryMode = BoundaryMode.INFINITE;
+                return "Infinite";
+            case INFINITE:
+                boundaryMode = BoundaryMode.WRAP;
+                return "Wrap";
+            default:
+                return "Wrap";
+        }
+    }
 
     void clearParticles() {
         particleCount = 0;
@@ -399,21 +492,25 @@ class SimulationPanel extends JPanel {
     
     void generateRandomParticles(int count) {
         clearParticles();
-        for (int i = 0; i < count && particleCount < MAX_PARTICLES; i++) {
-            colors[particleCount] = rand.nextInt(M);
-            positionsX[particleCount] = rand.nextFloat();
-            positionsY[particleCount] = rand.nextFloat();
-            velocitiesX[particleCount] = 0;
-            velocitiesY[particleCount] = 0;
-            particleCount++;
+        count = Math.min(count, MAX_PARTICLES);
+        for (int i = 0; i < count; i++) {
+            colors[i] = rand.nextInt(M);
+            positionsX[i] = rand.nextFloat();
+            positionsY[i] = rand.nextFloat();
+            velocitiesX[i] = 0;
+            velocitiesY[i] = 0;
         }
+        particleCount = count;
     }
 
     private void addParticlesInShape(Point start, Point end) {
-        double x1 = (double) start.x / getWidth();
-        double y1 = (double) start.y / getHeight();
-        double x2 = (double) end.x / getWidth();
-        double y2 = (double) end.y / getHeight();
+        Point2D.Double worldStart = screenToWorld(start.x, start.y);
+        Point2D.Double worldEnd = screenToWorld(end.x, end.y);
+        
+        double x1 = worldStart.x;
+        double y1 = worldStart.y;
+        double x2 = worldEnd.x;
+        double y2 = worldEnd.y;
         
         double centerX = (x1 + x2) / 2;
         double centerY = (y1 + y2) / 2;
@@ -421,7 +518,9 @@ class SimulationPanel extends JPanel {
         double height = Math.abs(y2 - y1);
         double radius = Math.hypot(width, height) / 2;
         
-        for (int i = 0; i < placeCount && particleCount < MAX_PARTICLES; i++) {
+        int toAdd = Math.min(placeCount, MAX_PARTICLES - particleCount);
+        
+        for (int i = 0; i < toAdd; i++) {
             double px, py;
             
             switch (placementShape) {
@@ -483,73 +582,147 @@ class SimulationPanel extends JPanel {
         double aspect = (double) width / height;
         double gridSize = R_MAX;
 
-        // number of columns/rows in normalized [0..1) space
-        int cols = (int) Math.ceil(1.0 / gridSize);
-        int rows = cols; // square grid in normalized coords
+        // Spatial grid for optimized neighbor search
+        Map<Long, List<Integer>> grid = new HashMap<>(particleCount / 4);
+        
+        if (boundaryMode == BoundaryMode.WRAP) {
+            int cols = (int) Math.ceil(1.0 / gridSize);
+            int rows = cols;
+            
+            for (int i = 0; i < particleCount; i++) {
+                int gx = (int) Math.floor(positionsX[i] / gridSize);
+                int gy = (int) Math.floor(positionsY[i] / gridSize);
+                gx = ((gx % cols) + cols) % cols;
+                gy = ((gy % rows) + rows) % rows;
+                long key = ((long) gx << 32) | (gy & 0xFFFFFFFFL);
+                grid.computeIfAbsent(key, k -> new ArrayList<>(8)).add(i);
+            }
+            
+            // Calculate forces
+            for (int i = 0; i < particleCount; i++) {
+                double fx = 0, fy = 0;
+                int gx = (int) Math.floor(positionsX[i] / gridSize);
+                int gy = (int) Math.floor(positionsY[i] / gridSize);
+                gx = ((gx % cols) + cols) % cols;
+                gy = ((gy % rows) + rows) % rows;
 
-        Map<String, List<Integer>> grid = new HashMap<>();
-        for (int i = 0; i < particleCount; i++) {
-            int gx = (int) Math.floor(positionsX[i] / gridSize);
-            int gy = (int) Math.floor(positionsY[i] / gridSize);
-            // wrap indices into [0..cols-1] and [0..rows-1]
-            gx = ((gx % cols) + cols) % cols;
-            gy = ((gy % rows) + rows) % rows;
-            String key = gx + "," + gy;
-            grid.computeIfAbsent(key, k -> new ArrayList<>()).add(i);
-        }
+                for (int dx = -1; dx <= 1; dx++) {
+                    for (int dy = -1; dy <= 1; dy++) {
+                        int nx = ((gx + dx) % cols + cols) % cols;
+                        int ny = ((gy + dy) % rows + rows) % rows;
+                        long key = ((long) nx << 32) | (ny & 0xFFFFFFFFL);
+                        List<Integer> cell = grid.get(key);
+                        if (cell == null) continue;
 
-        for (int i = 0; i < particleCount; i++) {
-            double fx = 0, fy = 0;
-            int gx = (int) Math.floor(positionsX[i] / gridSize);
-            int gy = (int) Math.floor(positionsY[i] / gridSize);
-            gx = ((gx % cols) + cols) % cols;
-            gy = ((gy % rows) + rows) % rows;
+                        for (int j : cell) {
+                            if (i == j) continue;
 
-            // check the 3x3 neighbor cells but with wrap-around indices
-            for (int dx = -1; dx <= 1; dx++) {
-                for (int dy = -1; dy <= 1; dy++) {
-                    int nx = gx + dx;
-                    int ny = gy + dy;
-                    // wrap neighbor indices
-                    nx = ((nx % cols) + cols) % cols;
-                    ny = ((ny % rows) + rows) % rows;
-                    String key = nx + "," + ny;
-                    List<Integer> cell = grid.get(key);
-                    if (cell == null) continue;
+                            double rx = positionsX[j] - positionsX[i];
+                            double ry = positionsY[j] - positionsY[i];
 
-                    for (int j : cell) {
-                        if (i == j) continue;
+                            if (rx > 0.5)  rx -= 1.0;
+                            if (rx < -0.5) rx += 1.0;
+                            if (ry > 0.5)  ry -= 1.0;
+                            if (ry < -0.5) ry += 1.0;
 
-                        double rx = positionsX[j] - positionsX[i];
-                        double ry = positionsY[j] - positionsY[i];
+                            double dxAspect = rx * aspect;
+                            double dyAspect = ry;
+                            double r = Math.hypot(dxAspect, dyAspect);
 
-                        // --- FIXED wrap-around (toroidal) distance ---
-                        if (rx > 0.5)  rx -= 1.0;
-                        if (rx < -0.5) rx += 1.0;
-                        if (ry > 0.5)  ry -= 1.0;
-                        if (ry < -0.5) ry += 1.0;
-
-                        // Correct aspect ratio scaling *after* wrapping
-                        double dxAspect = rx * aspect;
-                        double dyAspect = ry;
-                        double r = Math.hypot(dxAspect, dyAspect);
-
-                        if (r > 0 && r < R_MAX) {
-                            double f = force(r / R_MAX, matrix[colors[i]][colors[j]]);
-                            fx += (dxAspect / r) * f;
-                            fy += (dyAspect / r) * f;
+                            if (r > 0 && r < R_MAX) {
+                                double f = force(r / R_MAX, matrix[colors[i]][colors[j]]);
+                                double invR = 1.0 / r;
+                                fx += dxAspect * invR * f;
+                                fy += dyAspect * invR * f;
+                            }
                         }
                     }
                 }
+
+                velocitiesX[i] = (float) (velocitiesX[i] * frictionFactor + fx * DT / aspect);
+                velocitiesY[i] = (float) (velocitiesY[i] * frictionFactor + fy * DT);
+            }
+        } else {
+            // Closed or Infinite mode
+            for (int i = 0; i < particleCount; i++) {
+                int gx = (int) Math.floor(positionsX[i] / gridSize);
+                int gy = (int) Math.floor(positionsY[i] / gridSize);
+                long key = ((long) gx << 32) | (gy & 0xFFFFFFFFL);
+                grid.computeIfAbsent(key, k -> new ArrayList<>(8)).add(i);
             }
 
-            velocitiesX[i] = (float) (velocitiesX[i] * frictionFactor + fx * DT / aspect);
-            velocitiesY[i] = (float) (velocitiesY[i] * frictionFactor + fy * DT);
+            for (int i = 0; i < particleCount; i++) {
+                double fx = 0, fy = 0;
+                int gx = (int) Math.floor(positionsX[i] / gridSize);
+                int gy = (int) Math.floor(positionsY[i] / gridSize);
+
+                for (int dx = -1; dx <= 1; dx++) {
+                    for (int dy = -1; dy <= 1; dy++) {
+                        int nx = gx + dx;
+                        int ny = gy + dy;
+                        long key = ((long) nx << 32) | (ny & 0xFFFFFFFFL);
+                        List<Integer> cell = grid.get(key);
+                        if (cell == null) continue;
+
+                        for (int j : cell) {
+                            if (i == j) continue;
+
+                            double rx = positionsX[j] - positionsX[i];
+                            double ry = positionsY[j] - positionsY[i];
+
+                            double dxAspect = rx * aspect;
+                            double dyAspect = ry;
+                            double r = Math.hypot(dxAspect, dyAspect);
+
+                            if (r > 0 && r < R_MAX) {
+                                double f = force(r / R_MAX, matrix[colors[i]][colors[j]]);
+                                double invR = 1.0 / r;
+                                fx += dxAspect * invR * f;
+                                fy += dyAspect * invR * f;
+                            }
+                        }
+                    }
+                }
+
+                velocitiesX[i] = (float) (velocitiesX[i] * frictionFactor + fx * DT / aspect);
+                velocitiesY[i] = (float) (velocitiesY[i] * frictionFactor + fy * DT);
+            }
         }
 
+        // Update positions
         for (int i = 0; i < particleCount; i++) {
-            positionsX[i] = (float) ((positionsX[i] + velocitiesX[i] * DT + 1) % 1);
-            positionsY[i] = (float) ((positionsY[i] + velocitiesY[i] * DT + 1) % 1);
+            positionsX[i] += velocitiesX[i] * DT;
+            positionsY[i] += velocitiesY[i] * DT;
+            
+            if (boundaryMode == BoundaryMode.WRAP) {
+                positionsX[i] = (float) ((positionsX[i] % 1 + 1) % 1);
+                positionsY[i] = (float) ((positionsY[i] % 1 + 1) % 1);
+            } else if (boundaryMode == BoundaryMode.CLOSED) {
+                if (positionsX[i] < 0) {
+                    positionsX[i] = 0;
+                    velocitiesX[i] *= -0.5f;
+                } else if (positionsX[i] > 1) {
+                    positionsX[i] = 1;
+                    velocitiesX[i] *= -0.5f;
+                }
+                
+                if (positionsY[i] < 0) {
+                    positionsY[i] = 0;
+                    velocitiesY[i] *= -0.5f;
+                } else if (positionsY[i] > 1) {
+                    positionsY[i] = 1;
+                    velocitiesY[i] *= -0.5f;
+                }
+            }
+        }
+        
+        // FPS calculation
+        frameCount++;
+        long currentTime = System.nanoTime();
+        if (currentTime - lastFrameTime >= 1_000_000_000L) {
+            fps = frameCount * 1_000_000_000.0 / (currentTime - lastFrameTime);
+            frameCount = 0;
+            lastFrameTime = currentTime;
         }
     }
 
@@ -558,15 +731,33 @@ class SimulationPanel extends JPanel {
     protected void paintComponent(Graphics g) {
         super.paintComponent(g);
         Graphics2D g2d = (Graphics2D) g;
+        
+        // Disable anti-aliasing for better performance
+        g2d.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_OFF);
 
         int width = getWidth();
         int height = getHeight();
 
+        // Draw boundary in closed mode
+        if (boundaryMode == BoundaryMode.CLOSED) {
+            Point topLeft = worldToScreen(0, 0);
+            Point bottomRight = worldToScreen(1, 1);
+            g2d.setColor(new Color(60, 60, 60));
+            g2d.drawRect(topLeft.x, topLeft.y, 
+                        bottomRight.x - topLeft.x, 
+                        bottomRight.y - topLeft.y);
+        }
+
+        // Draw particles
+        int size = Math.max(1, (int) (2 * zoom));
         for (int i = 0; i < particleCount; i++) {
-            int x = (int) (positionsX[i] * width);
-            int y = (int) (positionsY[i] * height);
-            g2d.setColor(particleColors[colors[i]]);
-            g2d.fillRect(x, y, 2, 2);
+            Point screenPos = worldToScreen(positionsX[i], positionsY[i]);
+            
+            if (screenPos.x >= -10 && screenPos.x <= width + 10 &&
+                screenPos.y >= -10 && screenPos.y <= height + 10) {
+                g2d.setColor(particleColors[colors[i]]);
+                g2d.fillRect(screenPos.x, screenPos.y, size, size);
+            }
         }
         
         // Draw drag preview
@@ -602,9 +793,12 @@ class SimulationPanel extends JPanel {
             }
         }
         
-        // Draw particle count
+        // Draw info text
         g2d.setColor(Color.WHITE);
         g2d.drawString("Particles: " + particleCount, 10, 20);
+        String modeStr = boundaryMode == BoundaryMode.WRAP ? "Wrap" : 
+                        (boundaryMode == BoundaryMode.CLOSED ? "Closed" : "Infinite");
+        g2d.drawString(String.format("Zoom: %.2fx | Mode: %s | FPS: %.1f", zoom, modeStr, fps), 10, 40);
     }
 }
 
@@ -634,7 +828,7 @@ class MatrixPanel extends JPanel {
             header.setPreferredSize(new Dimension(60, 25));
             header.setOpaque(true);
             header.setHorizontalAlignment(JLabel.CENTER);
-            header.setBackground(Color.getHSBColor((float) j / SimulationPanel.M, 1.0f, 1.0f));
+            header.setBackground(simPanel.particleColors[j]);
             header.setForeground(Color.BLACK);
             add(header, gbc);
         }
@@ -647,7 +841,7 @@ class MatrixPanel extends JPanel {
             rowHeader.setPreferredSize(new Dimension(25, 25));
             rowHeader.setOpaque(true);
             rowHeader.setHorizontalAlignment(JLabel.CENTER);
-            rowHeader.setBackground(Color.getHSBColor((float) i / SimulationPanel.M, 1.0f, 1.0f));
+            rowHeader.setBackground(simPanel.particleColors[i]);
             rowHeader.setForeground(Color.BLACK);
             add(rowHeader, gbc);
             

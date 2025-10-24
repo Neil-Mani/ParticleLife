@@ -11,3 +11,15 @@ Lastly, you can manually add particles in the shape of a square, circle, ring, a
 The app was made in java using swing. These 2 options were not the best but what was available. Because of this, simulating a very high particle number may cause lag. Also, there are many issues with the app. Looking at it now, the colors are mixed up where the matrix has one color but the actual simulation has a different color. These will be fixed with time.
 
 🙂
+
+Updates:
+
+- On release, the matrix had a dark blue color which has now been removed and replaced by the actual particle color orange.
+- Wrap, closed, and infinite canvas environments have been added.
+- New optimizations have been added. The system supports up to 50,000 particles.
+  For a good computer the frames look something like this:
+
+  5,000 particles: Should run at 60 FPS easily
+  10,000 particles: 50-60 FPS on most systems
+  20,000 particles: 30-50 FPS 
+  30,000+ particles: 20-40 FPS depending on your CPU
